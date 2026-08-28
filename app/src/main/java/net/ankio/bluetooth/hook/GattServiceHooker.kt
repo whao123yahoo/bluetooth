@@ -15,23 +15,18 @@ import java.lang.reflect.Method
 import java.util.concurrent.atomic.AtomicReference
 
 /**
- * 本机模拟：Android 17+ 走 le_scan.ScanController.onScanResultInternal(11参)
+ * 本机模拟：Android 17+ 通过 le_scan.ScanController.onScanResultInternal 注入伪造 BLE 扫描结果。
  */
 class GattServiceHooker : PartHooker() {
 
     override fun hook() {
-        XposedBridge.log("BluetoothDebug: GattServiceHooker.hook() enter")
-
         val mode = readPref(PrefKeys.SIMULATE_MODE, "")
-        XposedBridge.log("BluetoothDebug: SIMULATE_MODE=[" + mode + "] Self=[" + SimulateMode.Self + "]")
-
-        // 临时强制本机模拟；确认配置同步正常后可改 forceSelf = false
-        val forceSelf = true
-        if (!forceSelf && mode != SimulateMode.Self.toString()) {
-            XposedBridge.log("BluetoothDebug: Local BLE simulation disabled")
+        if (mode != SimulateMode.Self.toString()) {
+            XposedBridge.log("BluetoothDebug: Local BLE simulation disabled, mode=[" + mode + "]")
             return
         }
-        XposedBridge.log("BluetoothDebug: Local BLE simulation started (forceSelf=" + forceSelf + ")")
+
+        XposedBridge.log("BluetoothDebug: Local BLE simulation started (ScanController)")
 
         val scanControllerClass = try {
             Hooker.loader(SCAN_CONTROLLER)
@@ -39,19 +34,16 @@ class GattServiceHooker : PartHooker() {
             XposedBridge.log("BluetoothDebug: ScanController not found: " + e.message)
             return
         }
-        XposedBridge.log("BluetoothDebug: ScanController class ok: " + scanControllerClass.name)
 
         try {
             XposedBridge.hookAllConstructors(
                 scanControllerClass,
                 object : XC_MethodHook() {
                     override fun afterHookedMethod(param: MethodHookParam) {
-                        XposedBridge.log("BluetoothDebug: ScanController constructed")
                         holdInstance(param.thisObject)
                     }
                 },
             )
-            XposedBridge.log("BluetoothDebug: hookAllConstructors ok")
         } catch (e: Throwable) {
             XposedBridge.log("BluetoothDebug: hookAllConstructors failed: " + e.message)
         }
@@ -60,20 +52,13 @@ class GattServiceHooker : PartHooker() {
             try {
                 if (scanControllerClass.declaredMethods.none { it.name == name }) continue
                 Hooker.after(scanControllerClass, name) {
-                    XposedBridge.log("BluetoothDebug: ScanController." + name)
                     holdInstance(it.thisObject)
                 }
             } catch (_: Throwable) {
             }
         }
 
-        val handler = getMainHandler()
-        if (handler != null) {
-            handler.post(injectRunnable)
-            XposedBridge.log("BluetoothDebug: injectRunnable posted")
-        } else {
-            XposedBridge.log("BluetoothDebug: MainLooper not ready")
-        }
+        getMainHandler()?.post(injectRunnable)
     }
 
     private fun holdInstance(obj: Any?) {
@@ -114,12 +99,11 @@ class GattServiceHooker : PartHooker() {
                     ByteUtils.hexStringToBytes(DEFAULT_ADV_DATA)
                 }
 
-                if (tick % 10 == 0) {
+                if (tick % 30 == 0) {
                     XposedBridge.log(
-                        "BluetoothDebug: using mac=" + mac +
+                        "BluetoothDebug: inject mac=" + mac +
                             " rssi=" + rssi +
-                            " dataLen=" + advData.size +
-                            " dataPrefix=" + dataHex.take(32),
+                            " dataLen=" + advData.size,
                     )
                 }
                 tick++
@@ -153,9 +137,6 @@ class GattServiceHooker : PartHooker() {
             return Handler(looper).also { mainHandler = it }
         }
 
-        /**
-         * 跨进程读模块配置：先 HookConfig，再 XSharedPreferences.reload()
-         */
         private fun readPref(key: String, default: String): String {
             try {
                 val v = HookConfig.getString(key, default)
@@ -169,7 +150,6 @@ class GattServiceHooker : PartHooker() {
                 if (!v.isNullOrEmpty()) return v
             } catch (_: Throwable) {
             }
-            // 常见自定义 prefs 文件名再试一次
             for (name in listOf("config", "settings", "bluetooth", MODULE_PACKAGE + "_preferences")) {
                 try {
                     val xp = XSharedPreferences(MODULE_PACKAGE, name)
