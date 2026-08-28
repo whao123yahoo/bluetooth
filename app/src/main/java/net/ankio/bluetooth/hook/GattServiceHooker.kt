@@ -263,7 +263,7 @@ class GattServiceHooker : PartHooker() {
             // AOSP 常见顺序：
             // eventType, addressType, address, primaryPhy, secondaryPhy,
             // advertisingSid, txPower, rssi, periodicAdvInt, advData [, originalAddress]
-            val base = arrayOf<Any>(
+            val base = listOf<Any>(
                 0x1b,   // eventType
                 0x00,   // addressType PUBLIC；部分栈用 0x01
                 mac,
@@ -275,12 +275,13 @@ class GattServiceHooker : PartHooker() {
                 0x00,   // periodicAdvInt
                 advData,
             )
-            val args: Array<Any> = when {
+            val argsList: List<Any> = when {
                 count >= 11 -> base + mac
-                count <= 0 -> emptyArray()
-                count < base.size -> base.copyOf(count)
+                count <= 0 -> emptyList()
+                count < base.size -> base.take(count)
                 else -> base
             }
+            val args = argsList.toTypedArray()
 
             method.isAccessible = true
             try {
