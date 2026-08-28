@@ -3,11 +3,11 @@ package net.ankio.bluetooth.hook
 import android.os.Handler
 import android.os.Looper
 import de.robv.android.xposed.XC_MethodHook
+import de.robv.android.xposed.XSharedPreferences
 import de.robv.android.xposed.XposedBridge
 import de.robv.android.xposed.XposedHelpers
 import net.ankio.bluetooth.model.SimulateMode
 import net.ankio.bluetooth.utils.ByteUtils
-import net.ankio.bluetooth.utils.HookLogManager
 import net.ankio.bluetooth.utils.PrefKeys
 import net.ankio.xposed.lib.hook.api.PartHooker
 import net.ankio.xposed.lib.hook.hook.Hooker
@@ -15,22 +15,17 @@ import java.lang.reflect.Method
 import java.util.concurrent.atomic.AtomicReference
 
 /**
- * 本机模拟：Android 17+ 走 le_scan.ScanController.onScanResult(11参)
+ * 本机模拟：Android 17+ 走 le_scan.ScanController.onScanResultInternal(11参)
  */
 class GattServiceHooker : PartHooker() {
 
     override fun hook() {
         XposedBridge.log("BluetoothDebug: GattServiceHooker.hook() enter")
 
-        val mode = try {
-            HookConfig.getString(PrefKeys.SIMULATE_MODE, "")
-        } catch (e: Throwable) {
-            XposedBridge.log("BluetoothDebug: read SIMULATE_MODE failed: " + e.message)
-            ""
-        }
+        val mode = readPref(PrefKeys.SIMULATE_MODE, "")
         XposedBridge.log("BluetoothDebug: SIMULATE_MODE=[" + mode + "] Self=[" + SimulateMode.Self + "]")
 
-        // 临时强制本机模拟，验证链路；成功后再改回判断 mode
+        // 临时强制本机模拟；确认配置同步正常后可改 forceSelf = false
         val forceSelf = true
         if (!forceSelf && mode != SimulateMode.Self.toString()) {
             XposedBridge.log("BluetoothDebug: Local BLE simulation disabled")
@@ -103,28 +98,32 @@ class GattServiceHooker : PartHooker() {
     }
 
     private val injectRunnable = object : Runnable {
+        private var tick = 0
+
         override fun run() {
             val target = scanControllerRef.get()
             val method = scanMethodRef.get()
             if (target != null && method != null) {
-                val mac = try {
-                    HookConfig.getString(PrefKeys.PREF_MAC, DEFAULT_MAC)
-                } catch (_: Throwable) {
-                    DEFAULT_MAC
-                }
-                val rssi = try {
-                    HookConfig.getString(PrefKeys.PREF_RSSI, DEFAULT_RSSI).toIntOrNull()
-                        ?: DEFAULT_RSSI.toInt()
-                } catch (_: Throwable) {
-                    DEFAULT_RSSI.toInt()
-                }
+                val mac = readPref(PrefKeys.PREF_MAC, DEFAULT_MAC)
+                val rssiStr = readPref(PrefKeys.PREF_RSSI, DEFAULT_RSSI)
+                val rssi = rssiStr.toIntOrNull() ?: DEFAULT_RSSI.toInt()
+                val dataHex = readPref(PrefKeys.PREF_DATA, DEFAULT_ADV_DATA)
                 val advData = try {
-                    ByteUtils.hexStringToBytes(
-                        HookConfig.getString(PrefKeys.PREF_DATA, DEFAULT_ADV_DATA),
-                    )
+                    ByteUtils.hexStringToBytes(dataHex)
                 } catch (_: Throwable) {
                     ByteUtils.hexStringToBytes(DEFAULT_ADV_DATA)
                 }
+
+                if (tick % 10 == 0) {
+                    XposedBridge.log(
+                        "BluetoothDebug: using mac=" + mac +
+                            " rssi=" + rssi +
+                            " dataLen=" + advData.size +
+                            " dataPrefix=" + dataHex.take(32),
+                    )
+                }
+                tick++
+
                 invokeScanResult(target, method, mac, rssi, advData)
             }
             getMainHandler()?.postDelayed(this, INTERVAL_MS)
@@ -135,6 +134,7 @@ class GattServiceHooker : PartHooker() {
         const val TAG = "BluetoothDebug"
 
         private const val SCAN_CONTROLLER = "com.android.bluetooth.le_scan.ScanController"
+        private const val MODULE_PACKAGE = "net.ankio.bluetooth"
         private const val INTERVAL_MS = 500L
         private const val DEFAULT_MAC = "76:A7:8A:67:66:C9"
         private const val DEFAULT_RSSI = "-50"
@@ -153,8 +153,36 @@ class GattServiceHooker : PartHooker() {
             return Handler(looper).also { mainHandler = it }
         }
 
+        /**
+         * 跨进程读模块配置：先 HookConfig，再 XSharedPreferences.reload()
+         */
+        private fun readPref(key: String, default: String): String {
+            try {
+                val v = HookConfig.getString(key, default)
+                if (v.isNotEmpty()) return v
+            } catch (_: Throwable) {
+            }
+            try {
+                val xp = XSharedPreferences(MODULE_PACKAGE)
+                xp.reload()
+                val v = xp.getString(key, null)
+                if (!v.isNullOrEmpty()) return v
+            } catch (_: Throwable) {
+            }
+            // 常见自定义 prefs 文件名再试一次
+            for (name in listOf("config", "settings", "bluetooth", MODULE_PACKAGE + "_preferences")) {
+                try {
+                    val xp = XSharedPreferences(MODULE_PACKAGE, name)
+                    xp.reload()
+                    val v = xp.getString(key, null)
+                    if (!v.isNullOrEmpty()) return v
+                } catch (_: Throwable) {
+                }
+            }
+            return default
+        }
+
         private fun findScanMethod(clazz: Class<*>): Method? {
-            // 优先 Internal，避免 onScanResult 里的 testMode 等提前 return
             val internal = clazz.declaredMethods.filter { it.name == "onScanResultInternal" }
             if (internal.isNotEmpty()) {
                 return internal.maxByOrNull { it.parameterTypes.size }
@@ -171,27 +199,22 @@ class GattServiceHooker : PartHooker() {
             advData: ByteArray,
         ) {
             val count = method.parameterTypes.size
-            XposedBridge.log(
-                "BluetoothDebug: invoke " + method.name + " count=" + count +
-                    " types=" + method.parameterTypes.joinToString { it.name },
-            )
-
             try {
                 if (count >= 11) {
                     XposedHelpers.callMethod(
                         target,
                         method.name,
-                        0x1b,          // eventType
-                        0x00,          // addressType
-                        mac,           // address
-                        0x01,          // primaryPhy
-                        0x00,          // secondaryPhy
-                        0xff,          // advertisingSid
-                        0x7f,          // txPower
-                        rssi,          // rssi
-                        0x00,          // periodicAdvInt
-                        advData,       // advData
-                        mac,           // originalAddress
+                        0x1b,
+                        0x00,
+                        mac,
+                        0x01,
+                        0x00,
+                        0xff,
+                        0x7f,
+                        rssi,
+                        0x00,
+                        advData,
+                        mac,
                     )
                 } else {
                     XposedHelpers.callMethod(
@@ -209,14 +232,12 @@ class GattServiceHooker : PartHooker() {
                         advData,
                     )
                 }
-                XposedBridge.log("BluetoothDebug: inject ok")
             } catch (e: Throwable) {
                 val cause = e.cause ?: e
                 XposedBridge.log(
                     "BluetoothDebug: inject failed: " +
                         cause.javaClass.name + ": " + cause.message,
                 )
-                XposedBridge.log(cause)
             }
         }
     }
