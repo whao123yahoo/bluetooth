@@ -20,68 +20,64 @@ import java.util.concurrent.atomic.AtomicReference
 class GattServiceHooker : PartHooker() {
 
     override fun hook() {
-        HookLogManager.d(TAG, "GattServiceHooker.hook() enter")
         XposedBridge.log("BluetoothDebug: GattServiceHooker.hook() enter")
 
         val mode = try {
             HookConfig.getString(PrefKeys.SIMULATE_MODE, "")
         } catch (e: Throwable) {
-            HookLogManager.e(TAG, "read SIMULATE_MODE failed: " + e.message)
+            XposedBridge.log("BluetoothDebug: read SIMULATE_MODE failed: " + e.message)
             ""
         }
+        XposedBridge.log("BluetoothDebug: SIMULATE_MODE=[" + mode + "] Self=[" + SimulateMode.Self + "]")
 
-        HookLogManager.d(TAG, "SIMULATE_MODE=" + mode)
-
-        if (mode != SimulateMode.Self.toString()) {
-            HookLogManager.d(TAG, "Local BLE simulation disabled")
+        // 临时强制本机模拟，验证链路；成功后再改回判断 mode
+        val forceSelf = true
+        if (!forceSelf && mode != SimulateMode.Self.toString()) {
+            XposedBridge.log("BluetoothDebug: Local BLE simulation disabled")
             return
         }
-
-        HookLogManager.d(TAG, "Local BLE simulation started (ScanController path)")
+        XposedBridge.log("BluetoothDebug: Local BLE simulation started (forceSelf=" + forceSelf + ")")
 
         val scanControllerClass = try {
             Hooker.loader(SCAN_CONTROLLER)
         } catch (e: Throwable) {
-            HookLogManager.e(TAG, "ScanController not found: " + e.message)
-            XposedBridge.log("BluetoothDebug: ScanController not found " + e.message)
+            XposedBridge.log("BluetoothDebug: ScanController not found: " + e.message)
             return
         }
-
-        HookLogManager.d(TAG, "ScanController class ok: " + scanControllerClass.name)
+        XposedBridge.log("BluetoothDebug: ScanController class ok: " + scanControllerClass.name)
 
         try {
             XposedBridge.hookAllConstructors(
                 scanControllerClass,
                 object : XC_MethodHook() {
                     override fun afterHookedMethod(param: MethodHookParam) {
-                        HookLogManager.d(TAG, "ScanController constructed")
+                        XposedBridge.log("BluetoothDebug: ScanController constructed")
                         holdInstance(param.thisObject)
                     }
                 },
             )
-            HookLogManager.d(TAG, "hookAllConstructors ok")
+            XposedBridge.log("BluetoothDebug: hookAllConstructors ok")
         } catch (e: Throwable) {
-            HookLogManager.e(TAG, "hookAllConstructors failed: " + e.message)
+            XposedBridge.log("BluetoothDebug: hookAllConstructors failed: " + e.message)
         }
 
         for (name in listOf("start", "startLocked", "init", "onStart")) {
             try {
                 if (scanControllerClass.declaredMethods.none { it.name == name }) continue
                 Hooker.after(scanControllerClass, name) {
-                    HookLogManager.d(TAG, "ScanController." + name)
+                    XposedBridge.log("BluetoothDebug: ScanController." + name)
                     holdInstance(it.thisObject)
                 }
             } catch (_: Throwable) {
             }
         }
 
-        // 延迟到 MainLooper 可用再启动定时任务
         val handler = getMainHandler()
         if (handler != null) {
             handler.post(injectRunnable)
-            HookLogManager.d(TAG, "injectRunnable posted")
+            XposedBridge.log("BluetoothDebug: injectRunnable posted")
         } else {
-            HookLogManager.e(TAG, "MainLooper not ready, skip inject timer")
+            XposedBridge.log("BluetoothDebug: MainLooper not ready")
         }
     }
 
@@ -89,7 +85,7 @@ class GattServiceHooker : PartHooker() {
         if (obj == null) return
         if (scanControllerRef.get() !== obj) {
             scanControllerRef.set(obj)
-            HookLogManager.d(TAG, "Held ScanController")
+            XposedBridge.log("BluetoothDebug: Held ScanController")
             resolveMethod(obj)
         }
     }
@@ -98,9 +94,9 @@ class GattServiceHooker : PartHooker() {
         val m = findScanMethod(obj.javaClass)
         if (m != null) {
             scanMethodRef.set(m)
-            HookLogManager.d(TAG, "FOUND " + m.name + " params=" + m.parameterTypes.size)
+            XposedBridge.log("BluetoothDebug: FOUND " + m.name + " params=" + m.parameterTypes.size)
         } else {
-            HookLogManager.e(TAG, "No onScanResult on ScanController")
+            XposedBridge.log("BluetoothDebug: No onScanResult on ScanController")
         }
     }
 
@@ -119,7 +115,7 @@ class GattServiceHooker : PartHooker() {
                     invokeScanResult(target, method, mac, rssi, advData)
                 }
             } catch (e: Throwable) {
-                HookLogManager.e(TAG, "inject failed: " + e.message)
+                XposedBridge.log("BluetoothDebug: inject failed: " + e.message)
             }
             getMainHandler()?.postDelayed(this, INTERVAL_MS)
         }
@@ -135,7 +131,6 @@ class GattServiceHooker : PartHooker() {
         private const val DEFAULT_ADV_DATA =
             "02010403033CFE17FF0001B500024271A7B6000000C983926CB1011000000000000000000000000000000000000000000000000000000000000000000000"
 
-        // 不要在这里写 Handler(Looper.getMainLooper())，类加载时 Looper 可能还是 null
         private val scanControllerRef = AtomicReference<Any?>(null)
         private val scanMethodRef = AtomicReference<Method?>(null)
 
