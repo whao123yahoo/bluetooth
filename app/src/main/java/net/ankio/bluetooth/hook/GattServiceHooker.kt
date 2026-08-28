@@ -17,7 +17,6 @@ import java.util.regex.Pattern
 
 /**
  * 本机模拟：Android 17+ 通过 le_scan.ScanController.onScanResultInternal 注入伪造 BLE 扫描结果。
- * 优化版本：减少重复代码，提高性能和可维护性
  */
 class GattServiceHooker : PartHooker() {
 
@@ -129,7 +128,6 @@ class GattServiceHooker : PartHooker() {
             val method = scanMethodRef.get()
             
             if (target == null || method == null) {
-                // 如果还没有实例，稍后重试
                 getMainHandler()?.postDelayed(this, INTERVAL_MS)
                 return
             }
@@ -137,7 +135,8 @@ class GattServiceHooker : PartHooker() {
             try {
                 // 读取配置
                 val mac = readPref(PrefKeys.PREF_MAC, DEFAULT_MAC)
-                val rssi = readPref(PrefKeys.PREF_RSSI, DEFAULT_RSSI).toIntOrNull() ?: DEFAULT_RSSI
+                val rssiStr = readPref(PrefKeys.PREF_RSSI, DEFAULT_RSSI_STR)
+                val rssi = rssiStr.toIntOrNull() ?: DEFAULT_RSSI
                 val data = parseAdvData()
 
                 // 计算配置哈希，检测是否变化
@@ -165,7 +164,6 @@ class GattServiceHooker : PartHooker() {
                 log("Injection error: ${e.javaClass.name}: ${e.message}")
             }
 
-            // 继续循环
             getMainHandler()?.postDelayed(this, INTERVAL_MS)
         }
 
@@ -210,22 +208,21 @@ class GattServiceHooker : PartHooker() {
         val paramCount = method.parameterTypes.size
         try {
             when (paramCount) {
-                // 根据参数数量调用不同的方法签名
                 11 -> {
                     XposedHelpers.callMethod(
                         target,
                         method.name,
-                        0x1b,  // 未知参数
-                        0x00,  // 未知参数
-                        mac,   // MAC地址
-                        0x01,  // 地址类型
-                        0x00,  // 未知参数
-                        0xff,  // 未知参数
-                        0x7f,  // 未知参数
-                        rssi,  // RSSI
-                        0x00,  // 未知参数
-                        advData, // 广告数据
-                        mac    // 再次传入MAC
+                        0x1b,
+                        0x00,
+                        mac,
+                        0x01,
+                        0x00,
+                        0xff,
+                        0x7f,
+                        rssi,
+                        0x00,
+                        advData,
+                        mac
                     )
                 }
                 10 -> {
@@ -310,6 +307,7 @@ class GattServiceHooker : PartHooker() {
         private const val INTERVAL_MS = 500L
         private const val DEFAULT_MAC = "76:A7:8A:67:66:C9"
         private const val DEFAULT_RSSI = -50
+        private const val DEFAULT_RSSI_STR = "-50"
         private const val DEFAULT_ADV_DATA = "02010403033CFE17FF0001B500024271A7B6000000C983926CB1011000000000000000000000000000000000000000000000000000000000000000000000"
 
         private val scanControllerRef = AtomicReference<Any?>(null)
