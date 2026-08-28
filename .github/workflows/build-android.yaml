@@ -32,23 +32,28 @@ jobs:
     - name: Grant execute permission for gradlew
       run: chmod +x gradlew
 
-    - name: Build Debug APK with stacktrace
-      run: ./gradlew :app:assembleDebug --stacktrace
+    # 关键修改：构建 Release，但强制使用 Debug 签名
+    - name: Build Release APK (unsigned, with debug signing)
+      run: |
+        ./gradlew :app:assembleRelease \
+          -Pandroid.injected.signing.store.file=$(echo $HOME/.android/debug.keystore) \
+          -Pandroid.injected.signing.store.password=android \
+          -Pandroid.injected.signing.key.alias=androiddebugkey \
+          -Pandroid.injected.signing.key.password=android
 
     - name: Prepare APK for release
       run: |
         mkdir -p release
-        cp app/build/outputs/apk/debug/*.apk release/app-debug.apk
+        cp app/build/outputs/apk/release/*.apk release/app-release.apk
         ls -la release/
 
     - name: Upload APK (Artifacts)
       uses: actions/upload-artifact@v4
       with:
-        name: app-debug
-        path: release/app-debug.apk
+        name: app-release
+        path: release/app-release.apk
         retention-days: 30
 
-    # 推送到 main/master 或手动触发时，发布到 Releases，方便直接下载
     - name: Publish to GitHub Release
       if: github.event_name != 'pull_request'
       uses: softprops/action-gh-release@v2
@@ -56,9 +61,9 @@ jobs:
         tag_name: build-${{ github.run_number }}
         name: Build #${{ github.run_number }}
         body: |
-          自动构建 Debug APK
+          自动构建 Release APK（使用 Debug 签名，仅个人使用）
           - Commit: ${{ github.sha }}
           - Branch: ${{ github.ref_name }}
-        files: release/app-debug.apk
+        files: release/app-release.apk
         draft: false
         prerelease: true
