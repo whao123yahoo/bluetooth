@@ -94,7 +94,9 @@ class GattServiceHooker : PartHooker() {
         val m = findScanMethod(obj.javaClass)
         if (m != null) {
             scanMethodRef.set(m)
-            XposedBridge.log("BluetoothDebug: FOUND " + m.name + " params=" + m.parameterTypes.size)
+            XposedBridge.log(
+                "BluetoothDebug: FOUND " + m.name + " params=" + m.parameterTypes.size,
+            )
         } else {
             XposedBridge.log("BluetoothDebug: No onScanResult on ScanController")
         }
@@ -102,20 +104,28 @@ class GattServiceHooker : PartHooker() {
 
     private val injectRunnable = object : Runnable {
         override fun run() {
-            try {
-                val target = scanControllerRef.get()
-                val method = scanMethodRef.get()
-                if (target != null && method != null) {
-                    val mac = HookConfig.getString(PrefKeys.PREF_MAC, DEFAULT_MAC)
-                    val rssi = HookConfig.getString(PrefKeys.PREF_RSSI, DEFAULT_RSSI)
-                        .toIntOrNull() ?: DEFAULT_RSSI.toInt()
-                    val advData = ByteUtils.hexStringToBytes(
+            val target = scanControllerRef.get()
+            val method = scanMethodRef.get()
+            if (target != null && method != null) {
+                val mac = try {
+                    HookConfig.getString(PrefKeys.PREF_MAC, DEFAULT_MAC)
+                } catch (_: Throwable) {
+                    DEFAULT_MAC
+                }
+                val rssi = try {
+                    HookConfig.getString(PrefKeys.PREF_RSSI, DEFAULT_RSSI).toIntOrNull()
+                        ?: DEFAULT_RSSI.toInt()
+                } catch (_: Throwable) {
+                    DEFAULT_RSSI.toInt()
+                }
+                val advData = try {
+                    ByteUtils.hexStringToBytes(
                         HookConfig.getString(PrefKeys.PREF_DATA, DEFAULT_ADV_DATA),
                     )
-                    invokeScanResult(target, method, mac, rssi, advData)
+                } catch (_: Throwable) {
+                    ByteUtils.hexStringToBytes(DEFAULT_ADV_DATA)
                 }
-            } catch (e: Throwable) {
-                XposedBridge.log("BluetoothDebug: inject failed: " + e.message)
+                invokeScanResult(target, method, mac, rssi, advData)
             }
             getMainHandler()?.postDelayed(this, INTERVAL_MS)
         }
@@ -144,10 +154,13 @@ class GattServiceHooker : PartHooker() {
         }
 
         private fun findScanMethod(clazz: Class<*>): Method? {
-            val methods = clazz.declaredMethods.filter {
-                it.name == "onScanResult" || it.name == "onScanResultInternal"
+            // 优先 Internal，避免 onScanResult 里的 testMode 等提前 return
+            val internal = clazz.declaredMethods.filter { it.name == "onScanResultInternal" }
+            if (internal.isNotEmpty()) {
+                return internal.maxByOrNull { it.parameterTypes.size }
             }
-            return methods.maxByOrNull { it.parameterTypes.size }
+            val normal = clazz.declaredMethods.filter { it.name == "onScanResult" }
+            return normal.maxByOrNull { it.parameterTypes.size }
         }
 
         private fun invokeScanResult(
@@ -157,27 +170,54 @@ class GattServiceHooker : PartHooker() {
             rssi: Int,
             advData: ByteArray,
         ) {
-            val full = listOf<Any>(
-                0x1b,
-                0x00,
-                mac,
-                0x01,
-                0x00,
-                0xff,
-                0x7f,
-                rssi,
-                0x00,
-                advData,
-                mac,
-            )
             val count = method.parameterTypes.size
-            val args = when {
-                count >= 11 -> full
-                count <= 0 -> emptyList()
-                else -> full.take(count)
-            }.toTypedArray()
-            method.isAccessible = true
-            method.invoke(target, *args)
+            XposedBridge.log(
+                "BluetoothDebug: invoke " + method.name + " count=" + count +
+                    " types=" + method.parameterTypes.joinToString { it.name },
+            )
+
+            try {
+                if (count >= 11) {
+                    XposedHelpers.callMethod(
+                        target,
+                        method.name,
+                        0x1b,          // eventType
+                        0x00,          // addressType
+                        mac,           // address
+                        0x01,          // primaryPhy
+                        0x00,          // secondaryPhy
+                        0xff,          // advertisingSid
+                        0x7f,          // txPower
+                        rssi,          // rssi
+                        0x00,          // periodicAdvInt
+                        advData,       // advData
+                        mac,           // originalAddress
+                    )
+                } else {
+                    XposedHelpers.callMethod(
+                        target,
+                        method.name,
+                        0x1b,
+                        0x00,
+                        mac,
+                        0x01,
+                        0x00,
+                        0xff,
+                        0x7f,
+                        rssi,
+                        0x00,
+                        advData,
+                    )
+                }
+                XposedBridge.log("BluetoothDebug: inject ok")
+            } catch (e: Throwable) {
+                val cause = e.cause ?: e
+                XposedBridge.log(
+                    "BluetoothDebug: inject failed: " +
+                        cause.javaClass.name + ": " + cause.message,
+                )
+                XposedBridge.log(cause)
+            }
         }
     }
 }
