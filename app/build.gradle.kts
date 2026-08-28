@@ -1,14 +1,14 @@
 plugins {
     id("com.android.application")
     id("org.jetbrains.kotlin.android")
-    id("org.jetbrains.kotlin.plugin.compose")
+    // id("org.jetbrains.kotlin.plugin.compose")  // 如果不用 Compose 就注释掉
     id("dev.rikka.tools.autoresconfig")
     id("net.ankio.xposed") version "1.0.1"
 }
 
 android {
     namespace = "net.ankio.bluetooth"
-    compileSdk = 36
+    compileSdk = 34  // 使用更稳定的版本
 
     defaultConfig {
         applicationId = "net.ankio.bluetooth"
@@ -19,31 +19,52 @@ android {
 
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
         ndk {
-            abiFilters += listOf("x86", "armeabi-v7a", "x86_64", "arm64-v8a")
+            // 只保留 arm 架构，移除 x86
+            abiFilters += listOf("armeabi-v7a", "arm64-v8a")
         }
+        // 限制资源语言
+        resConfigs("zh", "en")
     }
 
     buildTypes {
         getByName("release") {
             isMinifyEnabled = true
             isShrinkResources = true
-            proguardFiles(getDefaultProguardFile("proguard-android-optimize.txt"), "proguard-rules.pro")
+            proguardFiles(
+                getDefaultProguardFile("proguard-android-optimize.txt"),
+                "proguard-rules.pro"
+            )
             signingConfig = signingConfigs.getByName("debug")
         }
+        getByName("debug") {
+            // Debug 也开启混淆减少体积
+            isMinifyEnabled = true
+            isShrinkResources = true
+            proguardFiles(
+                getDefaultProguardFile("proguard-android-optimize.txt"),
+                "proguard-rules.pro"
+            )
+        }
     }
+    
     compileOptions {
-        sourceCompatibility = JavaVersion.VERSION_21
-        targetCompatibility = JavaVersion.VERSION_21
+        sourceCompatibility = JavaVersion.VERSION_17  // 使用 Java 17
+        targetCompatibility = JavaVersion.VERSION_17
     }
+    
+    // 如果不用 Compose，移除这个
     buildFeatures {
-        compose = true
+        // compose = true
+        viewBinding = true  // 使用传统 View 绑定
     }
+    
     autoResConfig {
         generateClass.set(true)
         generateRes.set(false)
         generatedClassFullName.set("net.ankio.utils.LangList")
         generatedArrayFirstItem.set("SYSTEM")
     }
+    
     packaging {
         resources {
             excludes += listOf(
@@ -55,9 +76,8 @@ android {
                 "META-INF/NOTICE.txt",
                 "META-INF/NOTICE.md",
                 "META-INF/ASL2.0",
-                "META-INF/gson/FieldAttributes.txt",
-                "META-INF/gson/LongSerializationPolicy.txt",
-                "META-INF/gson/annotations.txt"
+                "META-INF/gson/**",  // 简化排除
+                "**/*.kotlin_module"
             )
         }
     }
@@ -65,37 +85,33 @@ android {
 
 kotlin {
     compilerOptions {
-        jvmTarget.set(org.jetbrains.kotlin.gradle.dsl.JvmTarget.JVM_21)
+        jvmTarget.set(org.jetbrains.kotlin.gradle.dsl.JvmTarget.JVM_17)
     }
 }
 
 dependencies {
-    val composeBom = platform("androidx.compose:compose-bom:2026.05.01")
-
-    implementation(composeBom)
-    androidTestImplementation(composeBom)
-    implementation("androidx.compose.ui:ui")
-    debugImplementation("androidx.compose.ui:ui-tooling-preview")
-    implementation("androidx.compose.material3:material3")
-    implementation("androidx.compose.material:material-icons-extended")
-    implementation("androidx.activity:activity-compose:1.13.0")
-    implementation("androidx.activity:activity-ktx:1.13.0")
-    implementation("androidx.lifecycle:lifecycle-runtime-compose:2.10.0")
-    implementation("androidx.lifecycle:lifecycle-viewmodel-compose:2.10.0")
-
-    implementation("androidx.core:core-ktx:1.18.0")
-    implementation("com.google.android.material:material:1.14.0")
-    implementation("com.github.AnkioTomas:theme:1.1.5")
-    implementation("com.github.AnkioTomas:webdav:1.0.4")
-    testImplementation("junit:junit:4.13.2")
-    androidTestImplementation("androidx.test.ext:junit:1.3.0")
-    androidTestImplementation("androidx.test.espresso:espresso-core:3.7.0")
-
-    implementation("com.google.code.gson:gson:2.10.1")
-    implementation("org.jetbrains.kotlinx:kotlinx-coroutines-android:1.11.0")
-    debugImplementation("androidx.compose.ui:ui-tooling")
+    // 核心依赖 - 最小化
     implementation("com.github.AnkioTomas.XposedLib:lib:1.0.1")
     compileOnly("de.robv.android.xposed:api:82")
+    
+    // 如果不需要 UI，这些都可以移除
+    // 如果需要简单 UI，使用传统方式
+    implementation("androidx.appcompat:appcompat:1.6.1")
+    implementation("com.google.android.material:material:1.9.0")
+    implementation("androidx.constraintlayout:constraintlayout:2.1.4")
+    
+    // 工具库 - 按需保留
+    implementation("com.google.code.gson:gson:2.10.1")  // 如果不需要 JSON 解析可以移除
+    implementation("org.jetbrains.kotlinx:kotlinx-coroutines-android:1.7.3")  // 如果不需要协程可以移除
+    
+    // 测试依赖
+    testImplementation("junit:junit:4.13.2")
+    androidTestImplementation("androidx.test.ext:junit:1.1.5")
+    androidTestImplementation("androidx.test.espresso:espresso-core:3.5.1")
+    
+    // 移除以下依赖（如果不必要）
+    // implementation("com.github.AnkioTomas:theme:1.1.5")
+    // implementation("com.github.AnkioTomas:webdav:1.0.4")
 }
 
 xposed {
