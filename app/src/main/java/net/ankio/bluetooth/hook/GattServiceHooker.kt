@@ -20,7 +20,6 @@ import java.util.concurrent.atomic.AtomicReference
 class GattServiceHooker : PartHooker() {
 
     override fun hook() {
-        // 一进来就打日志，确认 hooker 被调用
         HookLogManager.d(TAG, "GattServiceHooker.hook() enter")
         XposedBridge.log("BluetoothDebug: GattServiceHooker.hook() enter")
 
@@ -28,12 +27,10 @@ class GattServiceHooker : PartHooker() {
             HookConfig.getString(PrefKeys.SIMULATE_MODE, "")
         } catch (e: Throwable) {
             HookLogManager.e(TAG, "read SIMULATE_MODE failed: " + e.message)
-            XposedBridge.log("BluetoothDebug: read mode failed " + e.message)
             ""
         }
 
         HookLogManager.d(TAG, "SIMULATE_MODE=" + mode)
-        XposedBridge.log("BluetoothDebug: SIMULATE_MODE=" + mode)
 
         if (mode != SimulateMode.Self.toString()) {
             HookLogManager.d(TAG, "Local BLE simulation disabled")
@@ -52,14 +49,12 @@ class GattServiceHooker : PartHooker() {
 
         HookLogManager.d(TAG, "ScanController class ok: " + scanControllerClass.name)
 
-        // 只 hook 构造函数，避免扫全方法导致崩溃
         try {
             XposedBridge.hookAllConstructors(
                 scanControllerClass,
                 object : XC_MethodHook() {
                     override fun afterHookedMethod(param: MethodHookParam) {
                         HookLogManager.d(TAG, "ScanController constructed")
-                        XposedBridge.log("BluetoothDebug: ScanController constructed")
                         holdInstance(param.thisObject)
                     }
                 },
@@ -67,10 +62,8 @@ class GattServiceHooker : PartHooker() {
             HookLogManager.d(TAG, "hookAllConstructors ok")
         } catch (e: Throwable) {
             HookLogManager.e(TAG, "hookAllConstructors failed: " + e.message)
-            XposedBridge.log("BluetoothDebug: hookAllConstructors failed " + e.message)
         }
 
-        // 再试几个常见名字（没有就跳过）
         for (name in listOf("start", "startLocked", "init", "onStart")) {
             try {
                 if (scanControllerClass.declaredMethods.none { it.name == name }) continue
@@ -82,8 +75,14 @@ class GattServiceHooker : PartHooker() {
             }
         }
 
-        mainHandler.post(injectRunnable)
-        HookLogManager.d(TAG, "injectRunnable posted")
+        // 延迟到 MainLooper 可用再启动定时任务
+        val handler = getMainHandler()
+        if (handler != null) {
+            handler.post(injectRunnable)
+            HookLogManager.d(TAG, "injectRunnable posted")
+        } else {
+            HookLogManager.e(TAG, "MainLooper not ready, skip inject timer")
+        }
     }
 
     private fun holdInstance(obj: Any?) {
@@ -91,7 +90,6 @@ class GattServiceHooker : PartHooker() {
         if (scanControllerRef.get() !== obj) {
             scanControllerRef.set(obj)
             HookLogManager.d(TAG, "Held ScanController")
-            XposedBridge.log("BluetoothDebug: Held ScanController")
             resolveMethod(obj)
         }
     }
@@ -100,13 +98,7 @@ class GattServiceHooker : PartHooker() {
         val m = findScanMethod(obj.javaClass)
         if (m != null) {
             scanMethodRef.set(m)
-            HookLogManager.d(
-                TAG,
-                "FOUND " + m.name + " params=" + m.parameterTypes.size,
-            )
-            XposedBridge.log(
-                "BluetoothDebug: FOUND " + m.name + " params=" + m.parameterTypes.size,
-            )
+            HookLogManager.d(TAG, "FOUND " + m.name + " params=" + m.parameterTypes.size)
         } else {
             HookLogManager.e(TAG, "No onScanResult on ScanController")
         }
@@ -129,7 +121,7 @@ class GattServiceHooker : PartHooker() {
             } catch (e: Throwable) {
                 HookLogManager.e(TAG, "inject failed: " + e.message)
             }
-            mainHandler.postDelayed(this, INTERVAL_MS)
+            getMainHandler()?.postDelayed(this, INTERVAL_MS)
         }
     }
 
@@ -143,9 +135,18 @@ class GattServiceHooker : PartHooker() {
         private const val DEFAULT_ADV_DATA =
             "02010403033CFE17FF0001B500024271A7B6000000C983926CB1011000000000000000000000000000000000000000000000000000000000000000000000"
 
-        private val mainHandler = Handler(Looper.getMainLooper())
+        // 不要在这里写 Handler(Looper.getMainLooper())，类加载时 Looper 可能还是 null
         private val scanControllerRef = AtomicReference<Any?>(null)
         private val scanMethodRef = AtomicReference<Method?>(null)
+
+        @Volatile
+        private var mainHandler: Handler? = null
+
+        private fun getMainHandler(): Handler? {
+            mainHandler?.let { return it }
+            val looper = Looper.getMainLooper() ?: return null
+            return Handler(looper).also { mainHandler = it }
+        }
 
         private fun findScanMethod(clazz: Class<*>): Method? {
             val methods = clazz.declaredMethods.filter {
