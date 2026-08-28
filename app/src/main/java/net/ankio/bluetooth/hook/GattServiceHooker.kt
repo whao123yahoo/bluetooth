@@ -3,6 +3,7 @@ package net.ankio.bluetooth.hook
 import android.os.Handler
 import android.os.Looper
 import de.robv.android.xposed.XC_MethodHook
+import de.robv.android.xposed.XposedBridge
 import de.robv.android.xposed.XposedHelpers
 import net.ankio.bluetooth.model.SimulateMode
 import net.ankio.bluetooth.utils.ByteUtils
@@ -14,13 +15,27 @@ import java.lang.reflect.Method
 import java.util.concurrent.atomic.AtomicReference
 
 /**
- * 本机模拟：Android 17+ 扫描在 le_scan.ScanController，
- * 通过 onScanResult(11 参) 注入伪造 BLE 结果。
+ * 本机模拟：Android 17+ 走 le_scan.ScanController.onScanResult(11参)
  */
 class GattServiceHooker : PartHooker() {
 
     override fun hook() {
-        if (HookConfig.getString(PrefKeys.SIMULATE_MODE, "") != SimulateMode.Self.toString()) {
+        // 一进来就打日志，确认 hooker 被调用
+        HookLogManager.d(TAG, "GattServiceHooker.hook() enter")
+        XposedBridge.log("BluetoothDebug: GattServiceHooker.hook() enter")
+
+        val mode = try {
+            HookConfig.getString(PrefKeys.SIMULATE_MODE, "")
+        } catch (e: Throwable) {
+            HookLogManager.e(TAG, "read SIMULATE_MODE failed: " + e.message)
+            XposedBridge.log("BluetoothDebug: read mode failed " + e.message)
+            ""
+        }
+
+        HookLogManager.d(TAG, "SIMULATE_MODE=" + mode)
+        XposedBridge.log("BluetoothDebug: SIMULATE_MODE=" + mode)
+
+        if (mode != SimulateMode.Self.toString()) {
             HookLogManager.d(TAG, "Local BLE simulation disabled")
             return
         }
@@ -30,68 +45,53 @@ class GattServiceHooker : PartHooker() {
         val scanControllerClass = try {
             Hooker.loader(SCAN_CONTROLLER)
         } catch (e: Throwable) {
-            HookLogManager.e(TAG, "ScanController class not found: " + e.message)
+            HookLogManager.e(TAG, "ScanController not found: " + e.message)
+            XposedBridge.log("BluetoothDebug: ScanController not found " + e.message)
             return
         }
 
-        // 1) 构造时抓住实例
+        HookLogManager.d(TAG, "ScanController class ok: " + scanControllerClass.name)
+
+        // 只 hook 构造函数，避免扫全方法导致崩溃
         try {
-            XposedHelpers.findAndHookConstructor(
+            XposedBridge.hookAllConstructors(
                 scanControllerClass,
                 object : XC_MethodHook() {
                     override fun afterHookedMethod(param: MethodHookParam) {
                         HookLogManager.d(TAG, "ScanController constructed")
+                        XposedBridge.log("BluetoothDebug: ScanController constructed")
                         holdInstance(param.thisObject)
                     }
                 },
             )
+            HookLogManager.d(TAG, "hookAllConstructors ok")
         } catch (e: Throwable) {
-            HookLogManager.d(TAG, "ScanController ctor hook skip: " + e.message)
+            HookLogManager.e(TAG, "hookAllConstructors failed: " + e.message)
+            XposedBridge.log("BluetoothDebug: hookAllConstructors failed " + e.message)
         }
 
-        // 2) 常见生命周期方法上再抓一次
-        for (name in listOf("start", "onStart", "init", "setAvailable")) {
-            if (!hasMethod(scanControllerClass, name)) continue
+        // 再试几个常见名字（没有就跳过）
+        for (name in listOf("start", "startLocked", "init", "onStart")) {
             try {
+                if (scanControllerClass.declaredMethods.none { it.name == name }) continue
                 Hooker.after(scanControllerClass, name) {
-                    HookLogManager.d(TAG, "ScanController lifecycle hold: " + name)
+                    HookLogManager.d(TAG, "ScanController." + name)
                     holdInstance(it.thisObject)
                 }
             } catch (_: Throwable) {
             }
         }
 
-        // 3) 兜底：任意实例方法第一次执行时抓住 this
-        try {
-            for (m in scanControllerClass.declaredMethods) {
-                try {
-                    XposedHelpers.findAndHookMethod(
-                        scanControllerClass,
-                        m.name,
-                        *m.parameterTypes,
-                        object : XC_MethodHook() {
-                            override fun afterHookedMethod(param: MethodHookParam) {
-                                if (scanControllerRef.get() == null) {
-                                    holdInstance(param.thisObject)
-                                }
-                            }
-                        },
-                    )
-                } catch (_: Throwable) {
-                }
-            }
-        } catch (e: Throwable) {
-            HookLogManager.d(TAG, "broad method hook skip: " + e.message)
-        }
-
         mainHandler.post(injectRunnable)
+        HookLogManager.d(TAG, "injectRunnable posted")
     }
 
     private fun holdInstance(obj: Any?) {
         if (obj == null) return
         if (scanControllerRef.get() !== obj) {
             scanControllerRef.set(obj)
-            HookLogManager.d(TAG, "Held ScanController: " + obj.javaClass.name)
+            HookLogManager.d(TAG, "Held ScanController")
+            XposedBridge.log("BluetoothDebug: Held ScanController")
             resolveMethod(obj)
         }
     }
@@ -100,11 +100,15 @@ class GattServiceHooker : PartHooker() {
         val m = findScanMethod(obj.javaClass)
         if (m != null) {
             scanMethodRef.set(m)
-            val types = m.parameterTypes.joinToString { it.simpleName }
-            HookLogManager.d(TAG, "FOUND " + m.name + "(" + m.parameterTypes.size + ") types=[" + types + "]")
+            HookLogManager.d(
+                TAG,
+                "FOUND " + m.name + " params=" + m.parameterTypes.size,
+            )
+            XposedBridge.log(
+                "BluetoothDebug: FOUND " + m.name + " params=" + m.parameterTypes.size,
+            )
         } else {
             HookLogManager.e(TAG, "No onScanResult on ScanController")
-            dumpMethods(obj.javaClass, "ScanController")
         }
     }
 
@@ -115,15 +119,15 @@ class GattServiceHooker : PartHooker() {
                 val method = scanMethodRef.get()
                 if (target != null && method != null) {
                     val mac = HookConfig.getString(PrefKeys.PREF_MAC, DEFAULT_MAC)
-                    val rssi = HookConfig.getString(PrefKeys.PREF_RSSI, DEFAULT_RSSI).toIntOrNull()
-                        ?: DEFAULT_RSSI.toInt()
+                    val rssi = HookConfig.getString(PrefKeys.PREF_RSSI, DEFAULT_RSSI)
+                        .toIntOrNull() ?: DEFAULT_RSSI.toInt()
                     val advData = ByteUtils.hexStringToBytes(
                         HookConfig.getString(PrefKeys.PREF_DATA, DEFAULT_ADV_DATA),
                     )
                     invokeScanResult(target, method, mac, rssi, advData)
                 }
             } catch (e: Throwable) {
-                HookLogManager.e(TAG, "Mock scan injection failed: " + e.message, e)
+                HookLogManager.e(TAG, "inject failed: " + e.message)
             }
             mainHandler.postDelayed(this, INTERVAL_MS)
         }
@@ -143,23 +147,11 @@ class GattServiceHooker : PartHooker() {
         private val scanControllerRef = AtomicReference<Any?>(null)
         private val scanMethodRef = AtomicReference<Method?>(null)
 
-        private fun hasMethod(clazz: Class<*>, name: String): Boolean =
-            clazz.declaredMethods.any { it.name == name }
-
         private fun findScanMethod(clazz: Class<*>): Method? {
             val methods = clazz.declaredMethods.filter {
                 it.name == "onScanResult" || it.name == "onScanResultInternal"
             }
             return methods.maxByOrNull { it.parameterTypes.size }
-        }
-
-        private fun dumpMethods(clazz: Class<*>, label: String) {
-            for (m in clazz.declaredMethods.sortedBy { it.name }) {
-                val n = m.name.lowercase()
-                if (!n.contains("scan") && !n.contains("result")) continue
-                val params = m.parameterTypes.joinToString { it.simpleName }
-                HookLogManager.d(TAG, "[" + label + "] " + m.name + "(" + params + ")")
-            }
         }
 
         private fun invokeScanResult(
@@ -169,8 +161,6 @@ class GattServiceHooker : PartHooker() {
             rssi: Int,
             advData: ByteArray,
         ) {
-            // 11 params: eventType, addressType, address, primaryPhy, secondaryPhy,
-            // advertisingSid, txPower, rssi, periodicAdvInt, advData, originalAddress
             val full = listOf<Any>(
                 0x1b,
                 0x00,
@@ -185,12 +175,11 @@ class GattServiceHooker : PartHooker() {
                 mac,
             )
             val count = method.parameterTypes.size
-            val argsList = when {
+            val args = when {
                 count >= 11 -> full
                 count <= 0 -> emptyList()
                 else -> full.take(count)
-            }
-            val args = argsList.toTypedArray()
+            }.toTypedArray()
             method.isAccessible = true
             method.invoke(target, *args)
         }
